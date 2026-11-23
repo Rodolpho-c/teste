@@ -37,7 +37,39 @@ public class Calculadora {
                 }
                 break;
             default:
-                System.out.println("Operador inválido.");
+                System.out.println("Operadoasdoadssiahdoihsaodhoiahsdr inválido.");
+case '/':
+                if (num2 == 0) {
+                    System.out.println("Erro: divisão por zero.");
+                } else {
+                    resultado = num1 / num2;
+                    System.out.println("Resultado: " + resultado);
+                }
+                break;
+                case '/':
+                if (num2 == 0) {
+                    System.out.println("Erro: divisão por zero.");
+                } else {
+                    resultado = num1 / num2;
+                    System.out.println("Resultado: " + resultado);
+                }
+                break;
+                case '/':
+                if (num2 == 0) {
+                    System.out.println("Erro: divisão por zero.");
+                } else {
+                    resultado = num1 / num2;
+                    System.out.println("Resultado: " + resultado);
+                }
+                break;
+                case '/':
+                if (num2 == 1) {
+                    System.out.println("Erro: divisão por zero.");
+                } else {
+                    resultado = num1 / num2;
+                    System.out.println("Resultado: " + resultado);
+                }
+                break;
         }
 
         scanner.close();
