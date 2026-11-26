@@ -1,0 +1,209 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+
+// =========================================================================
+// 1. PREENCHA AQUI COM O SEU WI-FI (PRECISA SER 2.4 GHz COM INTERNET)
+// =========================================================================
+const char* ssid     = "rods";
+const char* password = "senha123";
+
+// =========================================================================
+// 2. CREDENCIAIS DO SEU SERVIDOR EMQX CLOUD (JÁ PREENCHIDAS)
+// =========================================================================
+const char* mqtt_server = "q7f1191f.ala.eu-central-1.emqxsl.com";
+const int   mqtt_port   = 8883; // Porta segura TLS/SSL
+const char* mqtt_user   = "feijao_iot";
+const char* mqtt_pass   = "123";
+
+// Tópicos MQTT exclusivos do seu projeto
+const char* TOPICO_UMIDADE   = "ifsuldeminas/feijao/umidade";
+const char* TOPICO_BRUTO     = "ifsuldeminas/feijao/bruto";
+const char* TOPICO_BOMBA     = "ifsuldeminas/feijao/bomba";
+const char* TOPICO_MODO      = "ifsuldeminas/feijao/modo";
+const char* TOPICO_STATUS    = "ifsuldeminas/feijao/status";
+const char* TOPICO_HISTORICO = "ifsuldeminas/feijao/ultima_rega";
+const char* TOPICO_COMANDO   = "ifsuldeminas/feijao/comando";
+
+// =========================================================================
+// 3. PINOS E PARÂMETROS AGRONÔMICOS DO FEIJÃO
+// =========================================================================
+const int PINO_RELE = D1;         // GPIO 5 - Relé da bomba
+const int PINO_ALIM_SENSOR = D2;  // GPIO 4 - Alimentação pulsada do HW-080
+const int PINO_SENSOR = A0;       // Leitura analógica
+const bool RELE_ATIVA_EM_LOW = true;
+
+const int UMIDADE_GATILHO_MIN = 50;                     // Liga a bomba se umidade < 50%
+const unsigned long TEMPO_PULSO_REGA_MS = 3000;         // Pulso de 3s por rega
+const unsigned long INTERVALO_LEITURA_MS = 10000;       // Lê o sensor a cada 10s
+const unsigned long TEMPO_INFILTRACAO_MS = 20000;       // Espera 1 min entre regas
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+bool modoAutomatico = true;
+bool bombaLigada = false;
+int umidadeAtual = 0;
+int leituraBruta = 0;
+int totalRegas = 0;
+int umidadeAntesRega = 0;
+bool aguardandoPosRega = false;
+
+unsigned long ultimaLeitura = 0;
+unsigned long inicioRega = 0;
+unsigned long ultimaRegaConcluida = 0;
+
+void publicarEstadoBomba() {
+  client.publish(TOPICO_BOMBA, bombaLigada ? "LIGADA" : "DESLIGADA", true);
+}
+
+void ligarBomba(String origem) {
+  digitalWrite(PINO_RELE, RELE_ATIVA_EM_LOW ? LOW : HIGH);
+  if (!bombaLigada) {
+    totalRegas++;
+    umidadeAntesRega = umidadeAtual;
+    aguardandoPosRega = true;
+    String msg = "Rega #" + String(totalRegas) + " (" + origem + ") - Umidade inicial: " + String(umidadeAntesRega) + "%";
+    client.publish(TOPICO_HISTORICO, msg.c_str(), true);
+    Serial.println("[BOMBA] " + msg);
+  }
+  bombaLigada = true;
+  inicioRega = millis();
+  publicarEstadoBomba();
+}
+
+void desligarBomba() {
+  digitalWrite(PINO_RELE, RELE_ATIVA_EM_LOW ? HIGH : LOW);
+  if (bombaLigada) {
+    ultimaRegaConcluida = millis();
+    Serial.println("[BOMBA] Desligada");
+  }
+  bombaLigada = false;
+  publicarEstadoBomba();
+}
+
+void lerEPublicarUmidade() {
+  digitalWrite(PINO_ALIM_SENSOR, HIGH);
+  delay(200);
+  leituraBruta = analogRead(PINO_SENSOR);
+  digitalWrite(PINO_ALIM_SENSOR, LOW);
+
+  umidadeAtual = map(leituraBruta, 1023, 300, 0, 100);
+  umidadeAtual = constrain(umidadeAtual, 0, 100);
+
+  Serial.printf("Umidade: %d%% (Bruto A0: %d)\n", umidadeAtual, leituraBruta);
+
+  client.publish(TOPICO_UMIDADE, String(umidadeAtual).c_str(), true);
+  client.publish(TOPICO_BRUTO, String(leituraBruta).c_str(), true);
+
+  // Calcula a variação de umidade 30 segundos após a rega
+  if (aguardandoPosRega && !bombaLigada && (millis() - ultimaRegaConcluida >= 30000)) {
+    int variacao = umidadeAtual - umidadeAntesRega;
+    String sinal = (variacao >= 0) ? "+" : "";
+    String resumo = "Rega #" + String(totalRegas) + ": " + String(umidadeAntesRega) + "% -> " + String(umidadeAtual) + "% (" + sinal + String(variacao) + "%)";
+    client.publish(TOPICO_HISTORICO, resumo.c_str(), true);
+    aguardandoPosRega = false;
+  }
+}
+
+void callbackMQTT(char* topic, byte* payload, unsigned int length) {
+  String mensagem = "";
+  for (unsigned int i = 0; i < length; i++) {
+    mensagem += (char)payload[i];
+  }
+  mensagem.trim();
+  mensagem.toUpperCase();
+  
+  Serial.println("Comando recebido: " + mensagem);
+
+  if (mensagem == "PULSO") {
+    ligarBomba("Remoto_Pulso");
+  } 
+  else if (mensagem == "AUTO") {
+    modoAutomatico = true;
+    desligarBomba();
+    client.publish(TOPICO_MODO, "AUTOMATICO", true);
+  } 
+  else if (mensagem == "MANUAL") {
+    modoAutomatico = false;
+    desligarBomba();
+    client.publish(TOPICO_MODO, "MANUAL", true);
+  } 
+  else if (mensagem == "LIGAR" && !modoAutomatico) {
+    ligarBomba("Remoto_Manual");
+  } 
+  else if (mensagem == "DESLIGAR") {
+    desligarBomba();
+  }
+}
+
+void conectarWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando ao Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    yield();
+  }
+  Serial.println("\nWi-Fi Conectado! IP: " + WiFi.localIP().toString());
+}
+
+void reconectarMQTT() {
+  while (!client.connected()) {
+    Serial.print("Conectando ao EMQX Cloud...");
+    String clientId = "ESP8266-Feijao-" + String(random(0xffff), HEX);
+
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass, TOPICO_STATUS, 0, true, "OFFLINE")) {
+      Serial.println(" CONECTADO!");
+      client.publish(TOPICO_STATUS, "ONLINE", true);
+      client.publish(TOPICO_MODO, modoAutomatico ? "AUTOMATICO" : "MANUAL", true);
+      client.subscribe(TOPICO_COMANDO);
+      lerEPublicarUmidade();
+    } else {
+      Serial.print(" Falhou, erro rc=");
+      Serial.print(client.state());
+      Serial.println(" (tentando em 5s...)");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  pinMode(PINO_RELE, OUTPUT);
+  pinMode(PINO_ALIM_SENSOR, OUTPUT);
+  desligarBomba();
+  digitalWrite(PINO_ALIM_SENSOR, LOW);
+
+  conectarWiFi();
+  espClient.setInsecure(); // Necessário para conexão TLS no EMQX Cloud
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callbackMQTT);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconectarMQTT();
+  }
+  client.loop();
+
+  unsigned long agora = millis();
+
+  if (agora - ultimaLeitura >= INTERVALO_LEITURA_MS) {
+    ultimaLeitura = agora;
+    lerEPublicarUmidade();
+  }
+
+  if (modoAutomatico) {
+    if (bombaLigada && (agora - inicioRega >= TEMPO_PULSO_REGA_MS)) {
+      desligarBomba();
+    }
+
+    bool prontoParaRegar = (totalRegas == 0) || (agora - ultimaRegaConcluida >= TEMPO_INFILTRACAO_MS);
+    if (!bombaLigada && prontoParaRegar && (umidadeAtual < UMIDADE_GATILHO_MIN)) {
+      ligarBomba("Automatico");
+    }
+  }
+}
